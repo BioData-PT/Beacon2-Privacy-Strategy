@@ -39,11 +39,12 @@ def build_response_summary(exists, num_total_results):
 # receives results(count & records) of each queried dataset, authorized datasets, and granularity of results
 def build_generic_response(
     results_by_dataset:Dict[str,Tuple[int,list]], accessible_datasets:List[str], granularity:Granularity,
-    qparams, entity_schema):
+    qparams, entity_schema, registered:bool, public:bool):
     
     # iterate over all results to get:
     # total count
     # response by dataset
+    store = False
     num_total_results = 0
     response_list:List[Dict] = []
     for dataset_id in results_by_dataset:
@@ -64,6 +65,9 @@ def build_generic_response(
             dataset_response["results"] = []
             
         response_list.append(dataset_response)
+        
+        if dataset_id not in accessible_datasets and not registered and not public:
+                store = True
     
     beacon_response = {
         'meta': build_meta(qparams, entity_schema, granularity),
@@ -73,7 +77,9 @@ def build_generic_response(
             'resultSets': response_list
         }
     }
-    return beacon_response
+    return beacon_response, store
+
+
 
 
 def build_response_by_dataset(data, response_dict, num_total_results, qparams, func):

@@ -18,6 +18,8 @@ mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=
 mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/datasets*.bson --collection datasets
 mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/individuals*.bson --collection individuals
 mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/runs*.bson --collection runs
+mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/budget*.bson --collection budget
+mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/history*.bson --collection history
 
 mongorestore --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $backupDir/genomicVariations*.bson --collection genomicVariations
 #mongoimport --jsonArray --uri "mongodb://root:$DB_PASSWD@127.0.0.1:27017/beacon?authSource=admin" $genomicDataDir/genomicVariations*.json.gz --collection genomicVariations

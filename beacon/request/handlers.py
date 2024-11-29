@@ -2,12 +2,18 @@ import json
 import asyncio
 import copy
 import logging
+import math
 from typing import Dict, List, Tuple
+
+import numpy as np
 from aiohttp import web
 from aiohttp.web_request import Request
 from bson import json_util
 from beacon import conf
+from beacon.db import client
+from pymongo import ReturnDocument
 import yaml
+import math
 
 from beacon.request import ontologies
 from beacon.request.model import AlphanumericFilter, Granularity, RequestParams
@@ -60,62 +66,166 @@ def collection_handler(db_fn, request=None):
 
     return wrapper
 
+# support functions for the budget strategy
+
+# update the budget of a specific individual for a user in the budget collection
+def update_individual_budget(user_id, individual_id, amount):
+    try:
+        budget_collection = client.beacon['budget']
+        #LOG.debug(f"Updating budget for individual_id={individual_id} by amount={amount}")
+
+        # Find the document and update it, returning the updated document
+        updated_document = budget_collection.find_one_and_update(
+            {"individualId": individual_id, "userId": user_id},
+            {"$inc": {"budget": -amount}},
+            return_document=ReturnDocument.AFTER  # Return the updated document
+        )
+
+        return updated_document
+
+    except Exception as e:
+        LOG.error(f"Error updating budget: {str(e)}")
+        return None
+
+def pvalue_strategy(access_token, records, qparams):
+    helper = []
+    total_cases = 0
+    removed_individuals = []
+    removed = False
+
+    for record in records:
+        individual_ids = set()
+        individuals_to_remove = set()
+
+        # step 4: compute the risk for that query: ri = -log(1 - Di)
+        allele_frequency = record.get('alleleFrequency')
+        N = client.beacon.get_collection('individuals').count_documents({})  # total number of individuals !! if user requestes dataset, N = individuals in that dataset
+        Di = (1 - allele_frequency) ** (2 * N)
+        ri = -(math.log10(1 - Di))
+        LOG.debug(f"O CUSTO DESTA QUERY É ESTE = {ri}")
+
+        # fetch individualId from the biosample collection
+        case_level_data = record.get('caseLevelData', [])
+        for case in case_level_data:
+            individual_id = case.get('biosampleId')  # biosampleId = individualId
+            individual_ids.add(individual_id)
+
+        for individualId in individual_ids:
+            
+            search_criteria = {
+                "userId": access_token,
+                "individualId": individualId
+            }
+
+            # Step 2: check if query has been asked before
+            response_history = client.beacon['history'].find_one({"userId": access_token, "query": qparams.summary()})
+            if response_history is not None:
+                LOG.debug(f"Query was previously done by the same user")
+                return response_history["response"], helper, total_cases, removed, removed_individuals  # Return stored answer if query was asked before by the same user
+
+            # Step 3: check if there are records with bj > ri
+            budget_info = client.beacon['budget'].find_one(search_criteria)
+            if not budget_info:
+                p_value = 0.5 # upper bound on test errors
+                bj = -(math.log10(p_value))  # initial budget
+                budget_info = {
+                    "userId": access_token,
+                    "individualId": individualId,
+                    "budget": bj
+                }
+                client.beacon['budget'].insert_one(budget_info)
+
+            # re-fetch the budget_info to ensure we have the latest data
+            budget_info = client.beacon['budget'].find_one(search_criteria)
+
+            if budget_info and budget_info['budget'] < ri:
+                
+                individuals_to_remove.add(individualId)
+            else:
+                if budget_info['budget'] >= ri:
+                    # Step 7: reduce their budgets by ri
+                    update_individual_budget(access_token, individualId, ri)
+                    budget_info = client.beacon['budget'].find_one(search_criteria)
+
+        if individuals_to_remove:
+            # filter the individuals from the record
+            removed = True
+            removed_individuals = individuals_to_remove
+            LOG.debug(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            LOG.debug(f"Removed individuals: {list(individuals_to_remove)}") # signal to know which individuals have no more budget
+            LOG.debug(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            record['caseLevelData'] = [case for case in record['caseLevelData'] if case.get('biosampleId') not in individuals_to_remove]
+            if  record['caseLevelData'] != []:
+                helper.append(record)
+        else:
+            helper.append(record)
+        
+        total_cases += len(record['caseLevelData'])        
+
+    return None, helper, total_cases, removed, removed_individuals
+
+
 
 # handler with authentication & REMS
 # mostly from BioData.pt
 def generic_handler(db_fn, request=None):
-    
-    async def wrapper(request:Request):
+
+    async def wrapper(request: Request):
         LOG.info("-- Generic handler --")
-        
+
         # Get params
         entry_id = request.match_info.get('id', None)
         json_body = await request.json() if request.method == "POST" and request.has_body and request.can_read_body else {}
-        qparams:RequestParams = RequestParams(**json_body).from_request(request)
-        
+        qparams: RequestParams = RequestParams(**json_body).from_request(request)
+
         LOG.debug(f"Query Params = {qparams}")
-        
+
         LOG.debug(f"Headers = {request.headers}")
-        
+
         access_token_header = request.headers.get('Authorization')
         access_token_cookies = request.cookies.get("Authorization")
         LOG.debug(f"Access token header = {access_token_header}")
         LOG.debug(f"Access token cookies = {access_token_cookies}")
-        
-        # set access_token as the one we recieve in the header
+
+        registered = False
+        public = False
+
+        # set access_token as the one we receive in the header
         # if not in header, get the one from cookies
         if access_token_header:
             access_token = access_token_header
         else:
             access_token = access_token_cookies
-        
+
         # get specified datasets
-        requested_datasets = qparams.query.request_parameters.get("datasets", None) 
+        requested_datasets = qparams.query.request_parameters.get("datasets", None)
         LOG.debug(f"requested_datasets = {requested_datasets}")
-        
+
         # Start async task to request datasets from permissions server
         task_permissions = asyncio.create_task(get_accessible_datasets(access_token, requested_datasets))
 
         # if no datasets were specified, use all in DB
         if requested_datasets is None:
-        
             # get list of all datasets in DB
             _, _, all_dataset_docs = get_datasets(None, RequestParams())
-            all_dataset_ids = [ doc["id"] for doc in all_dataset_docs]
+            all_dataset_ids = [doc["id"] for doc in all_dataset_docs]
             target_datasets = all_dataset_ids
         # else, query only the ones specified
         else:
             target_datasets = requested_datasets
-        
+
         # TODO query all datasets in parallel
         tasks_dataset_queries = []
         # { dataset_id:(count, records) }
         datasets_query_results:Dict[str, Tuple[int,List[dict]]] = {}
-        
+
         db_fn_submodule = str(db_fn.__module__).split(".")[-1]
         LOG.debug(f"db_fn submodule = {db_fn_submodule}")
-        
-        
+
+        # get response of permissions server
+        accessible_datasets: List[str] = []  # array of dataset ids
+        accessible_datasets, public, registered = await task_permissions
+
         # TODO do this asynchronously
         for dataset_id in target_datasets:
             qparams_dataset = copy.deepcopy(qparams)
@@ -127,46 +237,69 @@ def generic_handler(db_fn, request=None):
             if db_fn_submodule == "g_variants":
                 filter_dataset_id = {
                     "id": "_info.datasetId",
-                    "value": dataset_id 
+                    "value": dataset_id
                 }
             else:
                 filter_dataset_id = {
-                    "id": "datasetId", 
+                    "id": "datasetId",
                     "value": dataset_id
                 }
-                                
+
             qparams_dataset.query.filters.append(filter_dataset_id)
             LOG.debug(f"Dataset Qparams = {qparams_dataset}")
             entity_schema, count, records = db_fn(entry_id, qparams_dataset)
-            dataset_result = (count, list(records))
-            datasets_query_results[dataset_id] = (dataset_result)
-        
-        
+
+            ######################## P-VALUE ########################
+
+            # apply the p-value strategy if user is authenticated but not registered and only if submodule is genomic variations
+            LOG.debug(f"PUBLIC = {public}")
+            LOG.debug(f"REGISTERED = {registered}")
+            if not public and not registered and db_fn_submodule == "g_variants":
+                history, records, total_cases, removed, removed_individuals = pvalue_strategy(access_token, records, qparams)
+                dataset_result = (len(list(records)), list(records))
+                LOG.debug(f"DATASET RESULTS = {dataset_result}")
+                datasets_query_results[dataset_id] = (dataset_result)
+                
+                if history is not None:
+                    LOG.debug(f"Query was stored in the database")
+                    LOG.debug(history)
+                    return await json_stream(request, history)
+
         LOG.debug(f"schema = {entity_schema}")
-        
-        # get response of permissions server
-        accessible_datasets:List[str] = [] # array of dataset ids
-        accessible_datasets = await task_permissions
 
         # get the max authorized granularity
         requested_granularity = qparams.query.requested_granularity
         max_granularity = Granularity(conf.max_beacon_granularity)
         response_granularity = Granularity.get_lower(requested_granularity, max_granularity)
-        
+
         # build response
-        
-        response = build_generic_response(
+        response, store = build_generic_response(
             results_by_dataset=datasets_query_results,
             accessible_datasets=accessible_datasets,
             granularity=response_granularity,
             qparams=qparams,
-            entity_schema=entity_schema
+            entity_schema=entity_schema,
+            registered=registered,
+            public=public
         )
+        LOG.debug(f"STOREEEE = {store}")
         
+
+        document = {
+            "userId": access_token,
+            "query": qparams.summary(),
+            "response": response
+        }
+
+        if store:
+            client.beacon['history'].insert_one(document)
+        
+        LOG.debug(f"response = {response}")
+
         return await json_stream(request, response)
-        
-        
+
     return wrapper
+
     
     
     

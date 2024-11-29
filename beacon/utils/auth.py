@@ -147,6 +147,6 @@ async def get_accessible_datasets(token, requested_datasets=None) -> List[str]:
         accessible_datasets = list(set(accessible_datasets).intersection(set(requested_datasets)))
     
     # remove duplicates and return result
-    return list(set(accessible_datasets))
+    return list(set(accessible_datasets)), is_authenticated, is_registered
     
     

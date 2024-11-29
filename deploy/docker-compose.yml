@@ -39,8 +39,6 @@ services:
 
   db:
     image: mongo:5
-    hostname: mongo
-    container_name: beacon-db
     ports:
       - 127.0.0.1:27017:27017
     environment:
@@ -52,8 +50,10 @@ services:
       - ./data:/input_data
       - ./mongo-scripts:/mongo-scripts
     networks:
-      - beacon-priv
-      - my-app-network
+      beacon-priv:
+              aliases:
+                      - mongo
+      my-app-network:
 
   mongo-express:
     image: mongo-express
@@ -64,7 +64,7 @@ services:
     environment:
       ME_CONFIG_MONGODB_ADMINUSERNAME: root
       ME_CONFIG_MONGODB_ADMINPASSWORD: ${DB_PASSWD}
-      ME_CONFIG_MONGODB_URL: mongodb://root:${DB_PASSWD}@mongo:27017/
+      ME_CONFIG_MONGODB_URL: mongodb://root:${DB_PASSWD}@db:27017/
       ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USERNAME}
       ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWD}
     networks:
@@ -108,7 +108,6 @@ services:
   permissions:
     image: pt/beacon:2.0
     hostname: beacon-permissions
-    container_name: beacon-permissions
     volumes:
       - ../permissions/:/beacon/permissions/  # inject the code, so we see the modifications "live"
       - ./logger.yml:/beacon/logger.yml

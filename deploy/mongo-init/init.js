@@ -15,6 +15,9 @@ db.createCollection("datasets");
 db.createCollection("genomicVariations");
 db.createCollection("individuals");
 db.createCollection("runs");
+db.createCollection("budget");
+db.createCollection("history");
+
 
 // Create indexes for all the entities in the database
 
@@ -25,3 +28,5 @@ db.datasets.createIndex([('$**', 'text')]);
 db.genomicVariations.createIndex([('$**', 'text')]);
 db.individuals.createIndex([('$**', 'text')]);
 db.runs.createIndex([('$**', 'text')]);
+db.budget.createIndex([('$**', 'text')]);
+db.history.createIndex([('$**', 'text')]);
